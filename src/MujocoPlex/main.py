@@ -1,54 +1,84 @@
 import os
 import mujoco
 import mujoco.viewer
+import time
+from typing import Optional
 
 
-def main():
-    # 模型路径（确保 mujoco_menagerie 在同级目录）
-    model_path = "anybotics_anymal_c/anymal_c.xml"
+def load_mujoco_model(model_path: str) -> Optional[tuple[mujoco.MjModel, mujoco.MjData]]:
+    if not isinstance(model_path, str):
+        print(f"❌ 模型路径必须为字符串类型，当前类型：{type(model_path)}")
+        return None
 
-    if not os.path.exists(model_path):
-        print(f"❌ 模型文件不存在：{model_path}")
-        print("💡 请把 mujoco_menagerie 放在代码同一级目录下")
-        return
+    abs_model_path = os.path.abspath(model_path)
+    if not os.path.exists(abs_model_path):
+        print(f"❌ 模型文件不存在：{abs_model_path}")
+        return None
 
-    print(f"✅ 正在加载：ANYmal B 机器人（已固定基座，不会掉落）")
+    try:
+        model = mujoco.MjModel.from_xml_path(abs_model_path)
+        data = mujoco.MjData(model)
+        print(f"✅ 成功加载模型：{abs_model_path}")
+        return model, data
+    except Exception as e:
+        print(f"❌ 模型加载失败：{str(e)}")
+        return None
 
-    # 加载模型
-    model = mujoco.MjModel.from_xml_path(model_path)
-    data = mujoco.MjData(model)
 
-    # ===================== 核心优化：防止机器人掉落 =====================
-    # 1. 固定机器人基座（最有效！直接把 torso 钉在世界坐标系）
-    model.body("base").pos = [0, 0, 0.5]  # 初始高度
-    model.body("base").quat = [1, 0, 0, 0]  # 初始姿态
-    model.body("base").freejoint = None  # 移除自由关节（关键！）
-    model.body("base").mocapid = 0  # 固定不动
+def configure_robot_stability(model: mujoco.MjModel, data: mujoco.MjData):
+    """
+    新版 MuJoCo 完全兼容版：不会出现 shape 不匹配
+    """
+    # 安全获取 base ID
+    base_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base")
 
-    # 2. 增加物理稳定性：阻尼、摩擦、防穿透
-    model.opt.timestep = 0.002  # 仿真步长（更稳定）
-    model.opt.gravity = [0, 0, -9.81]  # 正常重力
-    model.opt.o_margin = 0.001  # 碰撞边距（防穿透）
-    model.opt.o_solref = [0.02, 0.1]  # 接触刚度/阻尼
-    model.opt.o_solimp = [0.9, 0.95, 0.01]  # 接触摩擦参数
+    if base_id >= 0:
+        # 正确写法：只改前3位，避免 shape 不匹配
+        model.body_pos[base_id][:3] = [0, 0, 0.5]
+        model.body_quat[base_id][:4] = [1, 0, 0, 0]
 
-    # 3. 初始化关节角度（让机器人自然站立）
-    for i, name in enumerate(model.joint_names):
-        if "HAA" in name or "HFE" in name or "KFE" in name:
-            data.ctrl[i] = 0.0
+    # 仿真参数（标准写法）
+    model.opt.timestep = 0.002
+    model.opt.gravity[:] = [0, 0, -9.81]
 
-    # ==================================================================
+    # 初始化关节控制量
+    for i in range(model.nu):
+        data.ctrl[i] = 0.0
 
-    # 启动仿真
+
+def run_simulation(model: mujoco.MjModel, data: mujoco.MjData):
+    print("✅ 仿真启动成功！机器人已稳定运行")
+    print("❌ 关闭窗口即可退出")
+
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        print("🚀 仿真运行中 | 机器人已固定，不会掉落")
-        print("❌ 关闭窗口即可退出")
+        target_fps = 60
+        frame_interval = 1.0 / target_fps
 
-        # 稳定渲染循环（不疯狂占CPU）
         while viewer.is_running():
+            start = time.time()
             mujoco.mj_step(model, data)
             viewer.sync()
 
+            elapsed = time.time() - start
+            if elapsed < frame_interval:
+                time.sleep(frame_interval - elapsed)
+
+
+def main():
+    MODEL_PATH = "anybotics_anymal_c/anymal_c.xml"
+    model_data = load_mujoco_model(MODEL_PATH)
+    if not model_data:
+        return
+    model, data = model_data
+
+    configure_robot_stability(model, data)
+    run_simulation(model, data)
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n✅ 程序手动退出")
+    except Exception as e:
+        print(f"\n❌ 错误：{e}")
