@@ -115,6 +115,30 @@ def reset_robot(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     mujoco.mj_forward(model, data)
     print("🔄 已重置机器人初始姿态")
 
+# ===================== 新增：自动腿部摆动逻辑（移除按键依赖） =====================
+def auto_swing_control(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    """自动周期性腿部摆动，无键盘依赖"""
+    if not CONFIG["auto_swing_enable"]:
+        data.ctrl[:6] = 0.0
+        return
+    t = data.time
+    amp = CONFIG["joint_swing_amp"]
+    freq = CONFIG["swing_freq"]
+    swing_val = amp * np.sin(2 * np.pi * freq * t)
+    data.ctrl[:6] = swing_val
+
+# ===================== 重置机器人姿态函数 =====================
+def reset_robot(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    """恢复机器人初始基座、关节、速度、仿真时间"""
+    base_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, CONFIG["base_body"])
+    data.qpos[:] = 0.0
+    data.qpos[0:3] = CONFIG["base_pos"]
+    data.qpos[3:7] = CONFIG["base_quat"]
+    data.qvel[:] = 0.0
+    data.time = 0.0
+    data.ctrl[:] = 0.0
+    print("🔄 已重置机器人初始姿态")
+
 # ===================== 仿真主循环 =====================
 def run_simulation(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     """运行稳定帧率仿真"""
