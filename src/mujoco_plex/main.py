@@ -18,8 +18,8 @@ CONFIG = {
     "print_interval": 1.0,  # 打印间隔(秒)
     # 新增配置项
     "auto_swing_enable": True,       # 自动腿部周期摆动开关
-    "joint_swing_amp": 0.4,          # 关节摆动幅度
-    "swing_freq": 1.0,               # 腿部摆动频率
+    "joint_swing_amp": 0.2,          # 降低摆动幅度，防止失衡
+    "swing_freq": 0.8,               # 降低摆动频率
     "show_body_vel": True,           # 打印机身线速度
 }
 
@@ -48,42 +48,71 @@ def load_mujoco_model(model_path: str) -> Optional[Tuple[mujoco.MjModel, mujoco.
 
 # ===================== 机器人初始化 =====================
 def configure_robot(model: mujoco.MjModel, data: mujoco.MjData) -> None:
-    """配置机器人初始状态与仿真参数"""
+    """配置机器人初始状态与仿真参数【修复：改用data.qpos设置初始位姿】"""
     base_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, CONFIG["base_body"])
 
-    if base_id >= 0:
-        model.body_pos[base_id][:3] = CONFIG["base_pos"]
-        model.body_quat[base_id][:4] = CONFIG["base_quat"]
+    # 【修复1】不要修改model.body_pos，修改data.qpos才是仿真初始状态
+    data.qpos[:3] = CONFIG["base_pos"]
+    data.qpos[3:7] = CONFIG["base_quat"]
+    data.qvel[:] = 0.0
+    data.ctrl[:] = 0.0
 
     # 仿真参数
     model.opt.timestep = CONFIG["time_step"]
     model.opt.gravity[:] = CONFIG["gravity"]
 
-    # 控制量清零
-    data.ctrl[:] = 0.0
+    # 【修复2】强制前向动力学，刷新碰撞、重心、肢体位置，防止初始穿模掉落
+    mujoco.mj_forward(model, data)
 
-# ===================== 新增：自动腿部摆动逻辑（移除按键依赖） =====================
+# ===================== 新增：自动腿部摆动逻辑（优化，避免整体失衡掉落） =====================
 def auto_swing_control(model: mujoco.MjModel, data: mujoco.MjData) -> None:
-    """自动周期性腿部摆动，无键盘依赖"""
+    """自动周期性腿部摆动，分相位摆动，避免四条腿同步下压导致机身下坠"""
     if not CONFIG["auto_swing_enable"]:
-        data.ctrl[:6] = 0.0
+        data.ctrl[:] = 0.0
         return
     t = data.time
     amp = CONFIG["joint_swing_amp"]
     freq = CONFIG["swing_freq"]
-    swing_val = amp * np.sin(2 * np.pi * freq * t)
-    data.ctrl[:6] = swing_val
+
+    # 【修复3】四条腿分相位错开摆动，不会同时向下挤压机身
+    phase_fl = 0.0
+    phase_fr = np.pi
+    phase_rl = np.pi
+    phase_rr = 0.0
+
+    swing_fl = amp * np.sin(2 * np.pi * freq * t + phase_fl)
+    swing_fr = amp * np.sin(2 * np.pi * freq * t + phase_fr)
+    swing_rl = amp * np.sin(2 * np.pi * freq * t + phase_rl)
+    swing_rr = amp * np.sin(2 * np.pi * freq * t + phase_rr)
+
+    # Anymal C 前6个执行器：FL_HAA, FL_HFE, FL_KFE, FR_HAA, FR_HFE, FR_KFE
+    data.ctrl[0] = swing_fl
+    data.ctrl[1] = swing_fl * 0.6
+    data.ctrl[2] = swing_fl * 0.8
+    data.ctrl[3] = swing_fr
+    data.ctrl[4] = swing_fr * 0.6
+    data.ctrl[5] = swing_fr * 0.8
+
+    # 后腿如果有执行器继续错开，无则忽略
+    if model.nu > 6:
+        data.ctrl[6] = swing_rl
+        data.ctrl[7] = swing_rl * 0.6
+        data.ctrl[8] = swing_rl * 0.8
+        data.ctrl[9] = swing_rr
+        data.ctrl[10] = swing_rr * 0.6
+        data.ctrl[11] = swing_rr * 0.8
 
 # ===================== 重置机器人姿态函数 =====================
 def reset_robot(model: mujoco.MjModel, data: mujoco.MjData) -> None:
-    """恢复机器人初始基座、关节、速度、仿真时间"""
-    base_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, CONFIG["base_body"])
+    """恢复机器人初始基座、关节、速度、仿真时间【同步修复重置逻辑】"""
     data.qpos[:] = 0.0
     data.qpos[0:3] = CONFIG["base_pos"]
     data.qpos[3:7] = CONFIG["base_quat"]
     data.qvel[:] = 0.0
     data.time = 0.0
     data.ctrl[:] = 0.0
+    # 重置后必须刷新动力学
+    mujoco.mj_forward(model, data)
     print("🔄 已重置机器人初始姿态")
 
 # ===================== 仿真主循环 =====================
