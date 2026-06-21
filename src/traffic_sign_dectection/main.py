@@ -35,7 +35,7 @@ sys.path.append(str(carla_api_full_path))
 # ========== 第三方库导入 ==========
 try:
     import pygame
-    from pygame.locals import KMOD_CTRL, K_ESCAPE, K_q, K_r, K_h, K_f, K_p
+    from pygame.locals import KMOD_CTRL, K_ESCAPE, K_q, K_r, K_h, K_f, K_p, K_w
 except ImportError:
     raise RuntimeError("请安装pygame: pip install pygame")
 
@@ -306,6 +306,10 @@ class World(object):
         self._actor_filter = args.filter
         self._gamma = args.gamma
         self.is_paused = False
+        self.auto_weather = args.auto_weather
+        self.weather_interval = args.weather_interval
+        self.last_weather_switch = datetime.datetime.now()
+        self.target_location = None
 
         try:
             self.map = self.world.get_map()
@@ -363,6 +367,8 @@ class World(object):
         self.camera_manager.set_sensor(cam_index, notify=False)
 
         actor_type = get_actor_display_name(self.player)
+        self._weather_index = random.randint(0, len(self._weather_presets)-1)
+        self.next_weather()
         self.hud.notification(actor_type)
 
     def next_weather(self, reverse=False):
@@ -371,6 +377,13 @@ class World(object):
         preset = self._weather_presets[self._weather_index]
         self.hud.notification('Weather: %s' % preset[1])
         self.player.get_world().set_weather(preset[0])
+        self.last_weather_switch = datetime.datetime.now()
+
+    def get_distance_to_target(self):
+        if not self.player or not self.target_location:
+           return 0.0
+        current_loc = self.player.get_location()
+        return math.hypot(current_loc.x - self.target_location.x, current_loc.y - self.target_location.y)
 
     def reset_vehicle(self):
         """重置车辆到最近的生成点"""
@@ -436,7 +449,7 @@ class KeyboardControl(object):
     def __init__(self, world):
         self.world = world
         self.hud = world.hud
-        self.hud.notification("按R重置 | 按H帮助 | 按F存快照 | 按P暂停/恢复 | 按ESC退出", seconds=4.0)
+        self.hud.notification("按R重置 | 按H帮助 | 按F存快照 | 按P暂停/恢复 | 按W切换天气 | 按ESC退出", seconds=4.0)
         self.snapshot_triggered = False
 
     def parse_events(self):
@@ -456,6 +469,8 @@ class KeyboardControl(object):
                     self.world.is_paused = not self.world.is_paused
                     status = "已暂停" if self.world.is_paused else "已恢复"
                     self.hud.notification(f"自动驾驶{status}", seconds=2.0)
+                if event.key == K_w:
+                   self.world.next_weather()
         return False
 
     @staticmethod
@@ -521,6 +536,7 @@ class HUD(object):
             'Location:% 20s' % ('(% 5.1f, % 5.1f)' % (t.location.x, t.location.y)),
             'GNSS:% 24s' % ('(% 2.6f, % 3.6f)' % (world.gnss_sensor.lat, world.gnss_sensor.lon)),
             'Height:  % 18.0f m' % t.location.z,
+            'Distance to target: % 10.1f m' % world.get_distance_to_target(),
             '']
 
         if isinstance(c, carla.VehicleControl):
@@ -639,10 +655,13 @@ class HelpText(object):
             "H - 显示/隐藏本帮助",
             "F - 保存当前车辆状态快照（JSON格式）",
             "P - 暂停/恢复自动驾驶",
+            "W - 手动切换天气模式",
             "",
             "启动参数：",
             "-l / --loop - 到达目标后自动设置新目的地",
             "-b / --behavior - 智能体行为: cautious/normal/aggressive",
+            "--auto-weather - 启用自动定时切换天气",
+            "--weather-interval - 自动天气切换间隔（秒，默认30）",
             "-a / --agent - 智能体类型: Behavior/Basic"
         ]
         self.font = font
@@ -880,6 +899,7 @@ def game_loop(args):
             agent.set_destination((spawn_point.location.x,
                                    spawn_point.location.y,
                                    spawn_point.location.z))
+            world.target_location = destination
         else:
             agent = BehaviorAgent(world.player, behavior=args.behavior)
             spawn_points = world.map.get_spawn_points()
@@ -903,6 +923,10 @@ def game_loop(args):
                 controller.snapshot_triggered = False
 
             if not world.world.wait_for_tick(10.0):
+                if world.auto_weather:
+                   elapsed = (datetime.datetime.now() - world.last_weather_switch).total_seconds()
+                   if elapsed >= world.weather_interval:
+                      world.next_weather()
                 continue
 
             world.tick(clock)
@@ -928,6 +952,7 @@ def game_loop(args):
                             current_loc = world.player.get_location()
                             new_dest = get_random_destination(current_loc, spawn_points)
                             agent.set_destination(new_dest, start_location=current_loc)
+                            world.target_location = new_dest
                             agent.run_step()
 
                             tot_target_reached += 1
@@ -971,6 +996,8 @@ def main():
                            default='normal', help='智能体行为模式')
     argparser.add_argument("-a", "--agent", type=str, choices=["Behavior", "Basic"],
                            default="Behavior", help="智能体类型")
+    argparser.add_argument('--auto-weather', action='store_true', help='启用自动定时切换天气')
+    argparser.add_argument('--weather-interval', default=30, type=int, help='自动天气切换间隔（秒）')
     argparser.add_argument('-s', '--seed', default=None, type=int, help='随机种子')
 
     args = argparser.parse_args()
